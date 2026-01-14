@@ -1274,10 +1274,122 @@ def smart_volume_scanner(exchange: str = "KUCOIN", min_volume_ratio: float = 2.0
 
 # =============================================================================
 # ES/SPX/SPY INDEX TOOLS
+# Based on TradingView's SPY SPX ES Price Converter concept
+# https://www.tradingview.com/script/rWSx5jIz-SPY-SPX-ES-Price-Converter-Pt/
 # =============================================================================
 
-# Default ES to SPY ratio (approximately 10:1)
+from datetime import datetime, timedelta
+
+# Default ES to SPY ratio (approximately 10:1) - used as fallback
 DEFAULT_ES_SPY_RATIO = 10.0
+
+# Cache for live ratio to avoid excessive API calls
+_ratio_cache: Dict[str, Any] = {
+    "ratio": None,
+    "spy_price": None,
+    "spx_price": None,
+    "timestamp": None
+}
+_CACHE_DURATION = timedelta(minutes=2)
+
+
+def _get_live_prices() -> Dict[str, Optional[float]]:
+    """Fetch live prices for SPY and SPX from TradingView.
+
+    Returns dict with 'spy', 'spx' prices (or None if unavailable).
+    ES ≈ SPX (futures track the index closely).
+    """
+    if not TRADINGVIEW_TA_AVAILABLE:
+        return {"spy": None, "spx": None}
+
+    prices = {"spy": None, "spx": None}
+
+    # Fetch SPY
+    try:
+        spy_handler = TA_Handler(
+            symbol="SPY",
+            exchange="AMEX",
+            screener="america",
+            interval="5m"
+        )
+        spy_analysis = spy_handler.get_analysis()
+        prices["spy"] = spy_analysis.indicators.get("close")
+    except Exception:
+        pass
+
+    # Fetch SPX (S&P 500 index) - ES tracks this closely
+    try:
+        spx_handler = TA_Handler(
+            symbol="SPX",
+            exchange="SP",
+            screener="america",
+            interval="5m"
+        )
+        spx_analysis = spx_handler.get_analysis()
+        prices["spx"] = spx_analysis.indicators.get("close")
+    except Exception:
+        pass
+
+    return prices
+
+
+def _get_live_ratio() -> Dict[str, Any]:
+    """Get the live ES/SPY conversion ratio using TradingView data.
+
+    The ratio is calculated as: SPX / SPY (since ES ≈ SPX)
+    Caches result for 2 minutes to avoid excessive API calls.
+
+    Returns:
+        Dict with ratio, spy_price, spx_price, source, timestamp
+    """
+    global _ratio_cache
+
+    # Check cache validity
+    if (_ratio_cache["timestamp"] and
+        datetime.now() - _ratio_cache["timestamp"] < _CACHE_DURATION and
+        _ratio_cache["ratio"] is not None):
+        return {
+            "ratio": _ratio_cache["ratio"],
+            "spy_price": _ratio_cache["spy_price"],
+            "spx_price": _ratio_cache["spx_price"],
+            "source": "cached",
+            "timestamp": _ratio_cache["timestamp"].isoformat()
+        }
+
+    # Fetch live prices
+    prices = _get_live_prices()
+
+    spy_price = prices.get("spy")
+    spx_price = prices.get("spx")
+
+    # Calculate ratio if we have both prices
+    if spy_price and spx_price and spy_price > 0:
+        ratio = spx_price / spy_price
+
+        # Sanity check - ratio should be around 10
+        if 9.5 <= ratio <= 10.5:
+            _ratio_cache = {
+                "ratio": ratio,
+                "spy_price": spy_price,
+                "spx_price": spx_price,
+                "timestamp": datetime.now()
+            }
+            return {
+                "ratio": round(ratio, 4),
+                "spy_price": round(spy_price, 2),
+                "spx_price": round(spx_price, 2),
+                "source": "live",
+                "timestamp": datetime.now().isoformat()
+            }
+
+    # Fallback to default ratio
+    return {
+        "ratio": DEFAULT_ES_SPY_RATIO,
+        "spy_price": spy_price,
+        "spx_price": spx_price,
+        "source": "default (live prices unavailable)",
+        "timestamp": datetime.now().isoformat()
+    }
 
 @mcp.tool()
 def index_quote(
@@ -1390,72 +1502,115 @@ def index_quote(
 @mcp.tool()
 def es_to_spy_convert(
     es_level: float,
-    ratio: float = None
+    use_live: bool = True
 ) -> dict:
     """Convert ES (E-mini S&P 500 futures) price level to SPY equivalent.
 
+    Uses live TradingView prices for accurate conversion (like PtGambler's indicator).
+    Formula: spy_level = es_level * (SPY_price / SPX_price)
+
     Args:
         es_level: ES futures price (e.g., 6100.0)
-        ratio: Optional custom ES/SPY ratio. If not provided, uses ~10.0
+        use_live: If True, fetch live prices for accurate ratio. If False, use default 10.0
 
     Returns:
         SPY equivalent price and conversion details
     """
-    if ratio is None:
+    if use_live:
+        ratio_data = _get_live_ratio()
+        ratio = ratio_data["ratio"]
+        source = ratio_data["source"]
+        spy_price = ratio_data.get("spy_price")
+        spx_price = ratio_data.get("spx_price")
+    else:
         ratio = DEFAULT_ES_SPY_RATIO
+        source = "static"
+        spy_price = None
+        spx_price = None
 
     spy_level = es_level / ratio
 
     return {
         "es_level": es_level,
         "spy_level": round(spy_level, 2),
-        "ratio_used": ratio,
-        "note": "ES trades at ~10x SPY. Actual ratio varies slightly with fair value."
+        "ratio_used": round(ratio, 4),
+        "source": source,
+        "live_prices": {
+            "spy": spy_price,
+            "spx": spx_price
+        } if use_live else None
     }
 
 
 @mcp.tool()
 def spy_to_es_convert(
     spy_level: float,
-    ratio: float = None
+    use_live: bool = True
 ) -> dict:
     """Convert SPY price level to ES (E-mini S&P 500 futures) equivalent.
 
+    Uses live TradingView prices for accurate conversion (like PtGambler's indicator).
+    Formula: es_level = spy_level * (SPX_price / SPY_price)
+
     Args:
         spy_level: SPY ETF price (e.g., 610.0)
-        ratio: Optional custom ES/SPY ratio. If not provided, uses ~10.0
+        use_live: If True, fetch live prices for accurate ratio. If False, use default 10.0
 
     Returns:
         ES equivalent price and conversion details
     """
-    if ratio is None:
+    if use_live:
+        ratio_data = _get_live_ratio()
+        ratio = ratio_data["ratio"]
+        source = ratio_data["source"]
+        spy_price = ratio_data.get("spy_price")
+        spx_price = ratio_data.get("spx_price")
+    else:
         ratio = DEFAULT_ES_SPY_RATIO
+        source = "static"
+        spy_price = None
+        spx_price = None
 
     es_level = spy_level * ratio
 
     return {
         "spy_level": spy_level,
         "es_level": round(es_level, 2),
-        "ratio_used": ratio,
-        "note": "ES trades at ~10x SPY. Actual ratio varies slightly with fair value."
+        "ratio_used": round(ratio, 4),
+        "source": source,
+        "live_prices": {
+            "spy": spy_price,
+            "spx": spx_price
+        } if use_live else None
     }
 
 
 @mcp.tool()
 def convert_mancini_levels(
     levels: list[float],
-    direction: str = "es_to_spy"
+    direction: str = "es_to_spy",
+    use_live: bool = True
 ) -> dict:
     """Convert multiple Mancini newsletter levels between ES and SPY.
+
+    Uses live TradingView prices for accurate conversion.
 
     Args:
         levels: List of price levels to convert (e.g., [6100, 6120, 6150])
         direction: "es_to_spy" or "spy_to_es"
+        use_live: If True, fetch live prices for accurate ratio
 
     Returns:
         Converted levels with original values
     """
-    ratio = DEFAULT_ES_SPY_RATIO
+    if use_live:
+        ratio_data = _get_live_ratio()
+        ratio = ratio_data["ratio"]
+        source = ratio_data["source"]
+    else:
+        ratio = DEFAULT_ES_SPY_RATIO
+        source = "static"
+
     converted = []
 
     for level in levels:
@@ -1472,19 +1627,37 @@ def convert_mancini_levels(
 
     return {
         "direction": direction,
-        "ratio": ratio,
+        "ratio": round(ratio, 4),
+        "source": source,
         "levels": converted
     }
 
 
 @mcp.tool()
+def get_es_spy_ratio() -> dict:
+    """Get the current live ES/SPY conversion ratio.
+
+    Fetches live SPY and SPX prices from TradingView to calculate
+    the accurate conversion ratio (similar to PtGambler's indicator).
+
+    Returns:
+        Current ratio, live prices, and timestamp
+    """
+    return _get_live_ratio()
+
+
+@mcp.tool()
 def spy_key_levels(
-    timeframe: str = "1D"
+    timeframe: str = "1D",
+    use_live_ratio: bool = True
 ) -> dict:
     """Get key technical levels for SPY (support, resistance, pivots).
 
+    Includes ES equivalents using live price ratio.
+
     Args:
         timeframe: Time interval for level calculation (1h, 4h, 1D)
+        use_live_ratio: If True, use live prices for ES conversion
 
     Returns:
         Key support/resistance levels, pivot points, and moving averages
@@ -1493,6 +1666,15 @@ def spy_key_levels(
         return {"error": "tradingview_ta not available"}
 
     timeframe = sanitize_timeframe(timeframe, "1D")
+
+    # Get live ratio for ES conversions
+    if use_live_ratio:
+        ratio_data = _get_live_ratio()
+        ratio = ratio_data["ratio"]
+        ratio_source = ratio_data["source"]
+    else:
+        ratio = DEFAULT_ES_SPY_RATIO
+        ratio_source = "static"
 
     try:
         handler = TA_Handler(
@@ -1550,10 +1732,17 @@ def spy_key_levels(
                 "lower": round(bb_lower, 2) if bb_lower else None
             },
             "es_equivalents": {
-                "current": round(close * DEFAULT_ES_SPY_RATIO, 2),
-                "sma_20": round(sma_20 * DEFAULT_ES_SPY_RATIO, 2) if sma_20 else None,
-                "sma_50": round(sma_50 * DEFAULT_ES_SPY_RATIO, 2) if sma_50 else None,
-                "pivot": round(pivot * DEFAULT_ES_SPY_RATIO, 2) if pivot else None
+                "ratio_used": round(ratio, 4),
+                "ratio_source": ratio_source,
+                "current": round(close * ratio, 2),
+                "high": round(high * ratio, 2),
+                "low": round(low * ratio, 2),
+                "sma_20": round(sma_20 * ratio, 2) if sma_20 else None,
+                "sma_50": round(sma_50 * ratio, 2) if sma_50 else None,
+                "sma_200": round(sma_200 * ratio, 2) if sma_200 else None,
+                "pivot": round(pivot * ratio, 2) if pivot else None,
+                "r1": round(r1 * ratio, 2) if r1 else None,
+                "s1": round(s1 * ratio, 2) if s1 else None
             }
         }
 
