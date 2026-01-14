@@ -27,6 +27,12 @@ EXCHANGE_SCREENER = {
     "hk": "hongkong",       # Hong Kong (alternate)
     "hsi": "hongkong",      # Hang Seng Index constituents
     "nyse": "america",
+    # US Indices and Futures
+    "cme": "america",       # CME futures (ES, NQ, etc.)
+    "cboe": "america",      # CBOE (SPX options)
+    "amex": "america",      # American Stock Exchange
+    "sp": "america",        # S&P indices
+    "index": "america",     # Generic index
 }
 
 # Get absolute path to coinlist directory relative to this module

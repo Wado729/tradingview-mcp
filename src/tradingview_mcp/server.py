@@ -1272,6 +1272,363 @@ def smart_volume_scanner(exchange: str = "KUCOIN", min_volume_ratio: float = 2.0
 	return filtered_results[:limit]
 
 
+# =============================================================================
+# ES/SPX/SPY INDEX TOOLS
+# =============================================================================
+
+# Default ES to SPY ratio (approximately 10:1)
+DEFAULT_ES_SPY_RATIO = 10.0
+
+@mcp.tool()
+def index_quote(
+    symbol: str = "SPY",
+    timeframe: str = "15m"
+) -> dict:
+    """Get real-time quote and analysis for US indices/ETFs (SPY, SPX, QQQ, etc.).
+
+    Args:
+        symbol: Index/ETF symbol (SPY, QQQ, IWM, DIA, etc.)
+        timeframe: Time interval (5m, 15m, 1h, 4h, 1D)
+
+    Returns:
+        Current price, technical indicators, and trading signals
+    """
+    if not TRADINGVIEW_TA_AVAILABLE:
+        return {"error": "tradingview_ta not available"}
+
+    timeframe = sanitize_timeframe(timeframe, "15m")
+    symbol = symbol.upper().strip()
+
+    # Map common index symbols
+    symbol_map = {
+        "SPX": "SP:SPX",      # S&P 500 Index
+        "ES": "CME_MINI:ES1!", # E-mini S&P 500 Futures
+        "SPY": "AMEX:SPY",    # S&P 500 ETF
+        "QQQ": "NASDAQ:QQQ",  # Nasdaq 100 ETF
+        "NQ": "CME_MINI:NQ1!", # E-mini Nasdaq Futures
+        "DIA": "AMEX:DIA",    # Dow Jones ETF
+        "IWM": "AMEX:IWM",    # Russell 2000 ETF
+        "VIX": "CBOE:VIX",    # Volatility Index
+    }
+
+    # Get full symbol with exchange prefix
+    if symbol in symbol_map:
+        full_symbol = symbol_map[symbol]
+    elif ":" not in symbol:
+        full_symbol = f"AMEX:{symbol}"
+    else:
+        full_symbol = symbol
+
+    try:
+        # Parse exchange and symbol from full_symbol
+        if ":" in full_symbol:
+            exchange, ticker = full_symbol.split(":", 1)
+        else:
+            exchange, ticker = "AMEX", full_symbol
+
+        # Create handler for stocks/indices
+        handler = TA_Handler(
+            symbol=ticker,
+            exchange=exchange,
+            screener="america",
+            interval=timeframe
+        )
+
+        analysis = handler.get_analysis()
+        indicators = analysis.indicators
+        summary = analysis.summary
+
+        # Get key price data
+        close = indicators.get("close", 0)
+        open_price = indicators.get("open", 0)
+        high = indicators.get("high", 0)
+        low = indicators.get("low", 0)
+
+        # Calculate change
+        change_pct = ((close - open_price) / open_price * 100) if open_price else 0
+
+        return {
+            "symbol": full_symbol,
+            "timeframe": timeframe,
+            "price": {
+                "current": round(close, 2),
+                "open": round(open_price, 2),
+                "high": round(high, 2),
+                "low": round(low, 2),
+                "change_percent": round(change_pct, 2)
+            },
+            "indicators": {
+                "rsi": round(indicators.get("RSI", 0), 2),
+                "macd": round(indicators.get("MACD.macd", 0), 4),
+                "macd_signal": round(indicators.get("MACD.signal", 0), 4),
+                "sma_20": round(indicators.get("SMA20", 0), 2),
+                "sma_50": round(indicators.get("SMA50", 0), 2),
+                "sma_200": round(indicators.get("SMA200", 0), 2),
+                "ema_20": round(indicators.get("EMA20", 0), 2),
+                "bb_upper": round(indicators.get("BB.upper", 0), 2),
+                "bb_lower": round(indicators.get("BB.lower", 0), 2),
+                "atr": round(indicators.get("ATR", 0), 2),
+                "adx": round(indicators.get("ADX", 0), 2),
+                "volume": indicators.get("volume", 0)
+            },
+            "signals": {
+                "recommendation": summary.get("RECOMMENDATION", "NEUTRAL"),
+                "buy_signals": summary.get("BUY", 0),
+                "sell_signals": summary.get("SELL", 0),
+                "neutral_signals": summary.get("NEUTRAL", 0)
+            }
+        }
+
+    except Exception as e:
+        return {
+            "error": f"Failed to get quote for {symbol}: {str(e)}",
+            "symbol": symbol,
+            "hint": "Try symbols like SPY, QQQ, DIA, IWM, or use full format like AMEX:SPY"
+        }
+
+
+@mcp.tool()
+def es_to_spy_convert(
+    es_level: float,
+    ratio: float = None
+) -> dict:
+    """Convert ES (E-mini S&P 500 futures) price level to SPY equivalent.
+
+    Args:
+        es_level: ES futures price (e.g., 6100.0)
+        ratio: Optional custom ES/SPY ratio. If not provided, uses ~10.0
+
+    Returns:
+        SPY equivalent price and conversion details
+    """
+    if ratio is None:
+        ratio = DEFAULT_ES_SPY_RATIO
+
+    spy_level = es_level / ratio
+
+    return {
+        "es_level": es_level,
+        "spy_level": round(spy_level, 2),
+        "ratio_used": ratio,
+        "note": "ES trades at ~10x SPY. Actual ratio varies slightly with fair value."
+    }
+
+
+@mcp.tool()
+def spy_to_es_convert(
+    spy_level: float,
+    ratio: float = None
+) -> dict:
+    """Convert SPY price level to ES (E-mini S&P 500 futures) equivalent.
+
+    Args:
+        spy_level: SPY ETF price (e.g., 610.0)
+        ratio: Optional custom ES/SPY ratio. If not provided, uses ~10.0
+
+    Returns:
+        ES equivalent price and conversion details
+    """
+    if ratio is None:
+        ratio = DEFAULT_ES_SPY_RATIO
+
+    es_level = spy_level * ratio
+
+    return {
+        "spy_level": spy_level,
+        "es_level": round(es_level, 2),
+        "ratio_used": ratio,
+        "note": "ES trades at ~10x SPY. Actual ratio varies slightly with fair value."
+    }
+
+
+@mcp.tool()
+def convert_mancini_levels(
+    levels: list[float],
+    direction: str = "es_to_spy"
+) -> dict:
+    """Convert multiple Mancini newsletter levels between ES and SPY.
+
+    Args:
+        levels: List of price levels to convert (e.g., [6100, 6120, 6150])
+        direction: "es_to_spy" or "spy_to_es"
+
+    Returns:
+        Converted levels with original values
+    """
+    ratio = DEFAULT_ES_SPY_RATIO
+    converted = []
+
+    for level in levels:
+        if direction == "es_to_spy":
+            converted.append({
+                "original_es": level,
+                "spy_equivalent": round(level / ratio, 2)
+            })
+        else:
+            converted.append({
+                "original_spy": level,
+                "es_equivalent": round(level * ratio, 2)
+            })
+
+    return {
+        "direction": direction,
+        "ratio": ratio,
+        "levels": converted
+    }
+
+
+@mcp.tool()
+def spy_key_levels(
+    timeframe: str = "1D"
+) -> dict:
+    """Get key technical levels for SPY (support, resistance, pivots).
+
+    Args:
+        timeframe: Time interval for level calculation (1h, 4h, 1D)
+
+    Returns:
+        Key support/resistance levels, pivot points, and moving averages
+    """
+    if not TRADINGVIEW_TA_AVAILABLE:
+        return {"error": "tradingview_ta not available"}
+
+    timeframe = sanitize_timeframe(timeframe, "1D")
+
+    try:
+        handler = TA_Handler(
+            symbol="SPY",
+            exchange="AMEX",
+            screener="america",
+            interval=timeframe
+        )
+
+        analysis = handler.get_analysis()
+        indicators = analysis.indicators
+
+        close = indicators.get("close", 0)
+        high = indicators.get("high", 0)
+        low = indicators.get("low", 0)
+
+        # Get pivot points
+        pivot = indicators.get("Pivot.M.Classic.Middle", 0)
+        r1 = indicators.get("Pivot.M.Classic.R1", 0)
+        r2 = indicators.get("Pivot.M.Classic.R2", 0)
+        s1 = indicators.get("Pivot.M.Classic.S1", 0)
+        s2 = indicators.get("Pivot.M.Classic.S2", 0)
+
+        # Moving averages as dynamic support/resistance
+        sma_20 = indicators.get("SMA20", 0)
+        sma_50 = indicators.get("SMA50", 0)
+        sma_200 = indicators.get("SMA200", 0)
+
+        # Bollinger Bands
+        bb_upper = indicators.get("BB.upper", 0)
+        bb_lower = indicators.get("BB.lower", 0)
+
+        return {
+            "symbol": "SPY",
+            "timeframe": timeframe,
+            "current_price": round(close, 2),
+            "session": {
+                "high": round(high, 2),
+                "low": round(low, 2)
+            },
+            "pivot_points": {
+                "pivot": round(pivot, 2) if pivot else None,
+                "r1": round(r1, 2) if r1 else None,
+                "r2": round(r2, 2) if r2 else None,
+                "s1": round(s1, 2) if s1 else None,
+                "s2": round(s2, 2) if s2 else None
+            },
+            "moving_averages": {
+                "sma_20": round(sma_20, 2) if sma_20 else None,
+                "sma_50": round(sma_50, 2) if sma_50 else None,
+                "sma_200": round(sma_200, 2) if sma_200 else None
+            },
+            "bollinger_bands": {
+                "upper": round(bb_upper, 2) if bb_upper else None,
+                "lower": round(bb_lower, 2) if bb_lower else None
+            },
+            "es_equivalents": {
+                "current": round(close * DEFAULT_ES_SPY_RATIO, 2),
+                "sma_20": round(sma_20 * DEFAULT_ES_SPY_RATIO, 2) if sma_20 else None,
+                "sma_50": round(sma_50 * DEFAULT_ES_SPY_RATIO, 2) if sma_50 else None,
+                "pivot": round(pivot * DEFAULT_ES_SPY_RATIO, 2) if pivot else None
+            }
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to get SPY levels: {str(e)}"}
+
+
+@mcp.tool()
+def multi_index_scan(
+    symbols: list[str] = None,
+    timeframe: str = "15m"
+) -> list[dict]:
+    """Scan multiple indices/ETFs at once for quick market overview.
+
+    Args:
+        symbols: List of symbols to scan (default: SPY, QQQ, IWM, DIA)
+        timeframe: Time interval (5m, 15m, 1h, 4h, 1D)
+
+    Returns:
+        Summary of each index with price, change, and signals
+    """
+    if not TRADINGVIEW_TA_AVAILABLE:
+        return [{"error": "tradingview_ta not available"}]
+
+    if symbols is None:
+        symbols = ["SPY", "QQQ", "IWM", "DIA"]
+
+    timeframe = sanitize_timeframe(timeframe, "15m")
+    results = []
+
+    symbol_exchanges = {
+        "SPY": "AMEX",
+        "QQQ": "NASDAQ",
+        "IWM": "AMEX",
+        "DIA": "AMEX",
+        "VIX": "CBOE"
+    }
+
+    for symbol in symbols:
+        try:
+            exchange = symbol_exchanges.get(symbol.upper(), "AMEX")
+
+            handler = TA_Handler(
+                symbol=symbol.upper(),
+                exchange=exchange,
+                screener="america",
+                interval=timeframe
+            )
+
+            analysis = handler.get_analysis()
+            indicators = analysis.indicators
+            summary = analysis.summary
+
+            close = indicators.get("close", 0)
+            open_price = indicators.get("open", 0)
+            change_pct = ((close - open_price) / open_price * 100) if open_price else 0
+
+            results.append({
+                "symbol": symbol.upper(),
+                "price": round(close, 2),
+                "change_percent": round(change_pct, 2),
+                "rsi": round(indicators.get("RSI", 0), 1),
+                "recommendation": summary.get("RECOMMENDATION", "NEUTRAL"),
+                "volume": indicators.get("volume", 0)
+            })
+
+        except Exception as e:
+            results.append({
+                "symbol": symbol.upper(),
+                "error": str(e)
+            })
+
+    return results
+
+
 if __name__ == "__main__":
 	main()
 
